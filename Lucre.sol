@@ -129,8 +129,6 @@ contract Lucre is StandardToken {
     address public controlWallet;
     // company reserve, advisor fee & marketing
     address public companyWallet;
-    // time to wait between controlWallet price updates
-    uint256 public waitTime = 5 hours;
 
     // fundWallet controlled state variables
     // halted: halt buying due to emergency, tradeable: signal that assets have been acquired
@@ -140,21 +138,12 @@ contract Lucre is StandardToken {
     // -- totalSupply defined in StandardToken
     // -- mapping to token balances done in StandardToken
 
-    uint256 public previousUpdateTime = 0;
-    Price public currentPrice;
+
+    uint256 public rate;
     uint256 public minAmount = 0.10 ether;
 
-    // maps previousUpdateTime to the next price
-    mapping (uint256 => Price) public prices;
     // maps addresses
     mapping (address => bool) public whitelist;
-
-    // TYPES
-
-    struct Price { // tokensPerEth
-        uint256 numerator;
-        uint256 denominator;
-    }
 
 
     // EVENTS
@@ -162,9 +151,8 @@ contract Lucre is StandardToken {
     event Buy(address indexed participant, address indexed beneficiary, uint256 ethValue, uint256 amountTokens);
     event AllocatePresale(address indexed participant, uint256 amountTokens);
     event Whitelist(address indexed participant);
-    event PriceUpdate(uint256 numerator, uint256 denominator);
-    event AddLiquidity(uint256 ethAmount);
-    event RemoveLiquidity(uint256 ethAmount);
+    event RateUpdate(uint256 rate);
+
 
     // MODIFIERS
 
@@ -191,67 +179,37 @@ contract Lucre is StandardToken {
     modifier only_if_controlWallet {
         if (msg.sender == controlWallet) _;
     }
-    modifier require_waited {
-        require(safeSub(now, waitTime) >= previousUpdateTime);
-        _;
-    }
-    modifier only_if_increase (uint256 newNumerator) {
-        if (newNumerator > currentPrice.numerator) _;
-    }
+
 
     // CONSTRUCTOR
 
-    constructor (address controlWalletInput, address companyWalletInput, uint256 priceNumeratorInput) public {
+    constructor (address controlWalletInput, address companyWalletInput, uint256 priceNumeratorInput, 
+			uint preSaleDays, uint mainSaleDays, uint256 rateInput) public {
+		
         require(controlWalletInput != address(0));
         require(priceNumeratorInput > 0);
-        startTime = now + 30 days; // 30 days of presales
+        startTime = now + preSaleDays * 1 days; // 30 days of presales (default)
         fundWallet = msg.sender;
         controlWallet = controlWalletInput;
         companyWallet = companyWalletInput;
         whitelist[fundWallet] = true;
         whitelist[controlWallet] = true;
         whitelist[companyWallet] = true;
-        currentPrice = Price(priceNumeratorInput, 1000); // 1 token = 1 usd at ICO start
-        endTime = now + 58 days; // -8 weeks
-        previousUpdateTime = now;
+        endTime = now + (preSaleDays + mainSaleDays) * 1 days; // mainSaleDays = 28 days (default)
+		rate = rateInput;
+
     }
 
     // METHODS
 
     // allows controlWallet to update the price within a time constraint, allows fundWallet complete control
-    function updatePrice(uint256 newNumerator) external onlyManagingWallets {
-        require(newNumerator > 0);
-        require_limited_change(newNumerator);
+    function updatePrice(uint256 newRate) external onlyManagingWallets {
+        require(newRate > 0);
         // either controlWallet command is compliant or transaction came from fundWallet
-        currentPrice.numerator = newNumerator;
-        // maps time to new Price (if not during ICO)
-        prices[previousUpdateTime] = currentPrice;
-        previousUpdateTime = now;
-        emit PriceUpdate(newNumerator, currentPrice.denominator);
+        rate = newRate;
+        emit RateUpdate(rate);
     }
 
-    function require_limited_change (uint256 newNumerator)
-        private
-        only_if_controlWallet
-        require_waited
-        only_if_increase(newNumerator)
-    {
-        uint256 percentage_diff = 0;
-        percentage_diff = safeMul(newNumerator, 100) / currentPrice.numerator;
-        percentage_diff = safeSub(percentage_diff, 100);
-        // controlWallet can only increase price by max 20% and only every waitTime
-        require(percentage_diff <= 20);
-    }
-
-    function updatePriceDenominator(uint256 newDenominator) external onlyFundWallet {
-        require(now > endTime);
-        require(newDenominator > 0);
-        currentPrice.denominator = newDenominator;
-        // maps time to new Price
-        prices[previousUpdateTime] = currentPrice;
-        previousUpdateTime = now;
-        emit PriceUpdate(currentPrice.numerator, newDenominator);
-    }
 
     function allocateTokens(address participant, uint256 amountTokens) private {
         // 20% of total allocated for PR, Marketing, Team, Advisers
@@ -288,8 +246,8 @@ contract Lucre is StandardToken {
         require(participant != address(0));
         require(msg.value >= minAmount);
         require(now >= startTime && now < endTime);
-        uint256 icoDenominator = icoDenominatorPrice();
-        uint256 tokensToBuy = safeMul(msg.value, currentPrice.numerator) / icoDenominator;
+        uint256 bonus = getBonus();
+        uint256 tokensToBuy = safeMul(msg.value, rate) / bonus;  // for 30% bonus is 0.769 & for 35% bonus is 0.74
         allocateTokens(participant, tokensToBuy);
         // send ether to fundWallet
         fundWallet.transfer(msg.value);
@@ -297,35 +255,21 @@ contract Lucre is StandardToken {
     }
 
 
-    function icoDenominatorPrice() public view returns (uint256) {
+    function getBonus() public view returns (uint256) {
         uint256 icoDuration = safeSub(now, startTime);
-        uint256 denominator;
+        uint256 discount;
         if (icoDuration < 7 days) { 
-            return currentPrice.denominator;
+            discount = 1.00;
         } else if (icoDuration < 14 days) { 
-            denominator = safeMul(currentPrice.denominator, 110) / 100;
-            return denominator;
+            discount = 91/uint256(100); // 10% bonus
         } else if (icoDuration < 21 days) { 
-            denominator = safeMul(currentPrice.denominator, 115) / 100;
-            return denominator;
+            discount = 87/uint256(100); // 15% bonus
         } else {
-            denominator = safeMul(currentPrice.denominator, 120) / 100;
-            return denominator;
+            discount = 83/uint256(100); // 20% bonus
         } 
+		return discount;
     }
 
-    // allow fundWallet or controlWallet to add ether to contract
-    function addLiquidity() external onlyManagingWallets payable {
-        require(msg.value > 0);
-        emit AddLiquidity(msg.value);
-    }
-
-    // allow fundWallet to remove ether from contract
-    function removeLiquidity(uint256 amount) external onlyManagingWallets {
-        require(amount <= this.balance);
-        fundWallet.transfer(amount);
-        emit RemoveLiquidity(amount);
-    }
 
     function changeFundWallet(address newFundWallet) external onlyFundWallet {
         require(newFundWallet != address(0));
@@ -335,10 +279,6 @@ contract Lucre is StandardToken {
     function changeControlWallet(address newControlWallet) external onlyFundWallet {
         require(newControlWallet != address(0));
         controlWallet = newControlWallet;
-    }
-
-    function changeWaitTime(uint256 newWaitTime) external onlyFundWallet {
-        waitTime = newWaitTime;
     }
 
     function updateFundingStartTime(uint256 newStartTime) external onlyFundWallet {
@@ -384,7 +324,5 @@ contract Lucre is StandardToken {
     function transferFrom(address _from, address _to, uint256 _value) public isTradeable returns (bool success) {
         return super.transferFrom(_from, _to, _value);
     }
-
-    
 
 }
